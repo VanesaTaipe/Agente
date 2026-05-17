@@ -7,7 +7,6 @@ import numpy as np
 import streamlit as st
 import faiss
 from sentence_transformers import SentenceTransformer
-from openai import OpenAI
 from groq import Groq
 from audio_recorder_streamlit import audio_recorder
 
@@ -16,19 +15,14 @@ from audio_recorder_streamlit import audio_recorder
 # ==============================
 st.set_page_config(page_title="Asistente NIC con RAG", page_icon="🩺", layout="wide")
 
-# === API KEYS desde Streamlit Secrets ===
-GROQ_API_KEY   = st.secrets.get("GROQ_API_KEY")
-#OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY")
+# === API KEY desde Streamlit Secrets ===
+GROQ_API_KEY = st.secrets.get("GROQ_API_KEY")
 
 if not GROQ_API_KEY:
     st.error("⚠️ Falta GROQ_API_KEY en Streamlit Secrets")
     st.stop()
-#if not OPENAI_API_KEY:
- #   st.error("⚠️ Falta OPENAI_API_KEY en Streamlit Secrets")
-  #  st.stop()
 
-groq_client   = Groq(api_key=GROQ_API_KEY)
-#openai_client = OpenAI(api_key=OPENAI_API_KEY)
+groq_client = Groq(api_key=GROQ_API_KEY)
 
 # ==============================
 # CSS PERSONALIZADO
@@ -61,18 +55,39 @@ header    {visibility: hidden;}
 """, unsafe_allow_html=True)
 
 # ==============================
+# RUTAS ABSOLUTAS (compatibles con Streamlit Cloud)
+# Los archivos deben estar en la misma carpeta que App.py
+# ==============================
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+def ruta(nombre_archivo: str) -> str:
+    """Devuelve la ruta absoluta del archivo dentro del proyecto."""
+    return os.path.join(BASE_DIR, nombre_archivo)
+
+
+# ==============================
 # CARGAR VECTORSTORE DESDE ARCHIVOS NIC
-# Archivos esperados en el directorio raíz del proyecto:
-#   embeddings_nic.npy
-#   indice_nic.faiss
-#   metadata_nic.json
+# Archivos esperados en la misma carpeta que App.py:
+#   embeddings_nic (1).npy   →  embeddings_nic.npy
+#   indice_nic (1).faiss     →  indice_nic.faiss
+#   metadata_nic (1).json    →  metadata_nic.json
 # ==============================
 @st.cache_resource(show_spinner=False)
 def cargar_vectorstore():
-    index     = faiss.read_index("indice_nic.faiss")
-    emb_array = np.load("embeddings_nic.npy")
+    faiss_path    = ruta("indice_nic(1).faiss")
+    npy_path      = ruta("embeddings_nic(1).npy")
+    metadata_path = ruta("metadata_nic(1).json")
 
-    with open("metadata_nic.json", "r", encoding="utf-8") as f:
+    # Verificar existencia de archivos antes de cargar
+    for p in [faiss_path, npy_path, metadata_path]:
+        if not os.path.exists(p):
+            st.error(f"❌ Archivo no encontrado: {p}\nAsegúrate de subir los 3 archivos NIC al repositorio.")
+            st.stop()
+
+    index     = faiss.read_index(faiss_path)
+    emb_array = np.load(npy_path)
+
+    with open(metadata_path, "r", encoding="utf-8") as f:
         meta_data = json.load(f)
 
     # metadata_nic.json tiene {"mapping": {...}, "order": [...]}
@@ -509,7 +524,7 @@ def pipeline_rag(pregunta: str, k: int = 5) -> dict:
 
 
 # ==============================
-# TRANSCRIPCIÓN WHISPER
+# TRANSCRIPCIÓN CON GROQ WHISPER (gratis)
 # ==============================
 def transcribir_audio(audio_bytes: bytes) -> str:
     try:
@@ -517,13 +532,15 @@ def transcribir_audio(audio_bytes: bytes) -> str:
             tmp.write(audio_bytes)
             tmp_path = tmp.name
         with open(tmp_path, "rb") as audio_file:
-            transcript = openai_client.audio.transcriptions.create(
-                model="whisper-1", file=audio_file, language="es"
+            transcript = groq_client.audio.transcriptions.create(
+                model="whisper-large-v3",
+                file=("audio.wav", audio_file, "audio/wav"),
+                language="es"
             )
         os.unlink(tmp_path)
         return transcript.text.strip()
     except Exception as e:
-        st.error(f"❌ Error al transcribir con OpenAI Whisper: {e}")
+        st.error(f"❌ Error al transcribir con Groq Whisper: {e}")
         return ""
 
 
