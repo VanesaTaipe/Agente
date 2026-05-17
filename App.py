@@ -74,9 +74,9 @@ def ruta(nombre_archivo: str) -> str:
 # ==============================
 @st.cache_resource(show_spinner=False)
 def cargar_vectorstore():
-    faiss_path    = ruta("indice_nic(1).faiss")
-    npy_path      = ruta("embeddings_nic(1).npy")
-    metadata_path = ruta("metadata_nic(1).json")
+    faiss_path    = ruta("indice_nic (1).faiss")
+    npy_path      = ruta("embeddings_nic (1).npy")
+    metadata_path = ruta("metadata_nic (1).json")
 
     # Verificar existencia de archivos antes de cargar
     for p in [faiss_path, npy_path, metadata_path]:
