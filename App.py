@@ -18,7 +18,7 @@ st.set_page_config(page_title="Asistente NIC con RAG", page_icon="🩺", layout=
 
 # === API KEYS desde Streamlit Secrets ===
 GROQ_API_KEY   = st.secrets.get("GROQ_API_KEY")
-OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY")
+#OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY")
 
 if not GROQ_API_KEY:
     st.error("⚠️ Falta GROQ_API_KEY en Streamlit Secrets")
