@@ -1,9 +1,9 @@
 streamlit
 groq
 openai>=1.0.0
-faiss-cpu
+faiss-cpu==1.9.0
 numpy==1.26.4
-sentence-transformers>=2.7.0
-huggingface-hub
+sentence-transformers==3.0.1
+huggingface-hub>=0.23.0
 audio-recorder-streamlit
 python-dotenv==1.0.0
