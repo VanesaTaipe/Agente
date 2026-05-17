@@ -23,12 +23,12 @@ GROQ_API_KEY   = st.secrets.get("GROQ_API_KEY")
 if not GROQ_API_KEY:
     st.error("⚠️ Falta GROQ_API_KEY en Streamlit Secrets")
     st.stop()
-if not OPENAI_API_KEY:
-    st.error("⚠️ Falta OPENAI_API_KEY en Streamlit Secrets")
-    st.stop()
+#if not OPENAI_API_KEY:
+ #   st.error("⚠️ Falta OPENAI_API_KEY en Streamlit Secrets")
+  #  st.stop()
 
 groq_client   = Groq(api_key=GROQ_API_KEY)
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
+#openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 # ==============================
 # CSS PERSONALIZADO
