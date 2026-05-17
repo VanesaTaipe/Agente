@@ -142,11 +142,34 @@ def limpiar_json(text: str) -> str:
 
 
 # ==============================
-# BÚSQUEDA FAISS
+# BÚSQUEDA FAISS — con auto-detección de modelo
 # ==============================
+
+# Mapa dimensión → modelo de embeddings
+MODELOS_POR_DIM = {
+    1024: "intfloat/multilingual-e5-large",
+    768:  "intfloat/multilingual-e5-base",
+    384:  "intfloat/multilingual-e5-small",
+}
+
+@st.cache_resource(show_spinner=False)
+def obtener_modelo_embedding():
+    """Detecta la dimensión del índice FAISS y carga el modelo correcto automáticamente."""
+    index, _, _, _, _ = cargar_vectorstore()
+    dim = index.d
+    nombre_modelo = MODELOS_POR_DIM.get(dim, "intfloat/multilingual-e5-large")
+    return SentenceTransformer(nombre_modelo), dim
+
+
 def buscar(query: str, k: int = 8) -> list:
-    index, codigos_orden, textos, metadata_map, model = cargar_vectorstore()
+    index, codigos_orden, textos, metadata_map, _ = cargar_vectorstore()
+    model, dim_esperada = obtener_modelo_embedding()
     emb = model.encode(["query: " + query], normalize_embeddings=True, convert_to_numpy=True).astype("float32")
+    if emb.shape[1] != index.d:
+        raise ValueError(
+            f"Dimensión del embedding ({emb.shape[1]}) "
+            f"no coincide con el índice FAISS ({index.d})."
+        )
     scores, indices = index.search(emb, k)
     resultados = []
     for score, idx in zip(scores[0], indices[0]):
@@ -465,62 +488,118 @@ RESPUESTA:"""
 # ==============================
 # PIPELINE COMPLETO (5 AGENTES)
 # ==============================
+# Palabras de saludo / mensajes que no son consultas clínicas
+SALUDOS = {"hola", "hola!", "hello", "hi", "buenas", "buenos días", "buenas tardes",
+           "buenas noches", "hey", "que tal", "qué tal", "como estas", "cómo estás",
+           "buen día", "buen dia", "gracias", "ok", "okay", "si", "sí", "no"}
+
+def es_saludo(texto: str) -> bool:
+    return texto.strip().lower().rstrip("!?.") in SALUDOS or len(texto.strip()) < 8
+
+
 def pipeline_rag(pregunta: str, k: int = 5) -> dict:
     """
-    Pipeline multi-agente:
-    Agente 1: Clinical Reasoning + Reformulación
-    Retrieval: Multi-query con RRF + Clinical Reranker
-    Agente 3: Reflection (en retrieval loop)
-    Agente 2: Evidence Grounding
-    Agente 3: Clinical Synthesis
-    Agente 4: Hallucination Validator
-    Agente 5: Humanizer
+    Pipeline multi-agente con manejo robusto de errores.
+    Si el mensaje es un saludo o muy corto, responde sin activar el RAG.
     """
 
-    # --- Agente 1: Reformulación y reasoning ---
-    a1 = agente_1_reformular(pregunta)
+    # --- Detectar saludos / mensajes no clínicos ---
+    if es_saludo(pregunta):
+        return {
+            "thinking": {},
+            "query_rag": "",
+            "intervenciones": [],
+            "respuesta": (
+                "👋 ¡Hola! Soy tu asistente NIC con pipeline multi-agente.
 
-    # --- Retrieval multi-query ---
-    docs = buscar_multi_query(
-        query_original=pregunta,
-        query_opt=a1.get("query_rag", pregunta),
-        sub_queries=a1.get("sub_queries", []),
-        k=k + 3
-    )
+"
+                "Puedo ayudarte con consultas clínicas de enfermería basadas en la "
+                "Clasificación de Intervenciones de Enfermería (NIC).
 
-    # --- Clinical Reranker ---
-    docs_ranked = clinical_reranker(
-        docs,
-        sintomas=a1.get("sintomas", []),
-        keywords_nic=a1.get("keywords_nic", []),
-        top_k=k
-    )
+"
+                "**¿Qué deseas consultar?** Por ejemplo:
+"
+                "- *¿Qué intervenciones NIC aplican para un paciente con disnea?*
+"
+                "- *El paciente tiene tos productiva y SpO₂ de 88%, ¿qué hago?*
+"
+                "- *¿Cómo manejo la ansiedad en un paciente con asma?*"
+            ),
+            "contexto": ""
+        }
 
-    # --- Agente 2: Extracción de evidencia gold ---
-    lista_gold = agente_2_extraer_gold(docs_ranked[:k])
+    try:
+        # --- Agente 1: Reformulación y reasoning ---
+        a1 = agente_1_reformular(pregunta)
 
-    # --- Agente 3: Síntesis clínica ---
-    respuesta_raw = agente_3_generar_respuesta(pregunta, lista_gold, a1.get("thinking", {}))
+        # --- Retrieval multi-query ---
+        docs = buscar_multi_query(
+            query_original=pregunta,
+            query_opt=a1.get("query_rag", pregunta),
+            sub_queries=a1.get("sub_queries", []),
+            k=k + 3
+        )
 
-    # --- Agente 4: Validación ---
-    respuesta_validada = agente_4_validar(respuesta_raw, docs_ranked[:k])
+        # --- Clinical Reranker ---
+        docs_ranked = clinical_reranker(
+            docs,
+            sintomas=a1.get("sintomas", []),
+            keywords_nic=a1.get("keywords_nic", []),
+            top_k=k
+        )
 
-    # --- Agente 5: Humanización ---
-    respuesta_final = agente_5_humanizar(respuesta_validada, pregunta)
+        # --- Agente 2: Extracción de evidencia gold ---
+        lista_gold = agente_2_extraer_gold(docs_ranked[:k])
 
-    # Contexto para mostrar en el expander
-    contexto_mostrable = ""
-    for i, d in enumerate(docs_ranked[:k], 1):
-        score = d.get("rerank_score", d.get("fusion_score", d.get("score", 0)))
-        contexto_mostrable += f"🔹 **Doc {i} — NIC {d['codigo']} (score={score:.4f})**\n{d['texto'][:300]}...\n\n"
+        # --- Agente 3: Síntesis clínica ---
+        respuesta_raw = agente_3_generar_respuesta(pregunta, lista_gold, a1.get("thinking", {}))
 
-    return {
-        "thinking":    a1.get("thinking", {}),
-        "query_rag":   a1.get("query_rag", ""),
-        "intervenciones": [g["codigo"] for g in lista_gold],
-        "respuesta":   respuesta_final,
-        "contexto":    contexto_mostrable
-    }
+        # --- Agente 4: Validación ---
+        respuesta_validada = agente_4_validar(respuesta_raw, docs_ranked[:k])
+
+        # --- Agente 5: Humanización ---
+        respuesta_final = agente_5_humanizar(respuesta_validada, pregunta)
+
+        # Contexto para el expander
+        contexto_mostrable = ""
+        for i, d in enumerate(docs_ranked[:k], 1):
+            score = d.get("rerank_score", d.get("fusion_score", d.get("score", 0)))
+            contexto_mostrable += f"🔹 **Doc {i} — NIC {d['codigo']} (score={score:.4f})**\n{d['texto'][:300]}...\n\n"
+
+        return {
+            "thinking":       a1.get("thinking", {}),
+            "query_rag":      a1.get("query_rag", ""),
+            "intervenciones": [g["codigo"] for g in lista_gold],
+            "respuesta":      respuesta_final,
+            "contexto":       contexto_mostrable
+        }
+
+    except ValueError as e:
+        # Error de dimensión FAISS — informar al usuario claramente
+        return {
+            "thinking": {}, "query_rag": "", "intervenciones": [], "contexto": "",
+            "respuesta": (
+                f"⚠️ **Error de compatibilidad del índice FAISS:**
+
+{e}
+
+"
+                "Por favor verifica que los archivos `indice_nic.faiss` y `embeddings_nic.npy` "
+                "fueron generados con el mismo modelo de embeddings configurado en la app."
+            )
+        }
+    except Exception as e:
+        # Cualquier otro error — respuesta amigable sin crash
+        return {
+            "thinking": {}, "query_rag": "", "intervenciones": [], "contexto": "",
+            "respuesta": (
+                "😔 Ocurrió un error al procesar tu consulta. "
+                "Por favor intenta reformularla o inténtalo de nuevo en unos segundos.
+
+"
+                f"_Detalle técnico: {str(e)[:200]}_"
+            )
+        }
 
 
 # ==============================
