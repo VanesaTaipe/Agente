@@ -510,19 +510,12 @@ def pipeline_rag(pregunta: str, k: int = 5) -> dict:
             "query_rag": "",
             "intervenciones": [],
             "respuesta": (
-                "👋 ¡Hola! Soy tu asistente NIC con pipeline multi-agente.
-
-"
+                "👋 ¡Hola! Soy tu asistente NIC con pipeline multi-agente.\n\n"
                 "Puedo ayudarte con consultas clínicas de enfermería basadas en la "
-                "Clasificación de Intervenciones de Enfermería (NIC).
-
-"
-                "**¿Qué deseas consultar?** Por ejemplo:
-"
-                "- *¿Qué intervenciones NIC aplican para un paciente con disnea?*
-"
-                "- *El paciente tiene tos productiva y SpO₂ de 88%, ¿qué hago?*
-"
+                "Clasificación de Intervenciones de Enfermería (NIC).\n\n"
+                "**¿Qué deseas consultar?** Por ejemplo:\n"
+                "- *¿Qué intervenciones NIC aplican para un paciente con disnea?*\n"
+                "- *El paciente tiene tos productiva y SpO₂ de 88%, ¿qué hago?*\n"
                 "- *¿Cómo manejo la ansiedad en un paciente con asma?*"
             ),
             "contexto": ""
@@ -579,12 +572,9 @@ def pipeline_rag(pregunta: str, k: int = 5) -> dict:
         return {
             "thinking": {}, "query_rag": "", "intervenciones": [], "contexto": "",
             "respuesta": (
-                f"⚠️ **Error de compatibilidad del índice FAISS:**
-
-{e}
-
-"
-                "Por favor verifica que los archivos `indice_nic.faiss` y `embeddings_nic.npy` "
+                "⚠️ **Error de compatibilidad del índice FAISS:**\n\n"
+                + str(e) +
+                "\n\nPor favor verifica que los archivos `indice_nic.faiss` y `embeddings_nic.npy` "
                 "fueron generados con el mismo modelo de embeddings configurado en la app."
             )
         }
@@ -594,10 +584,8 @@ def pipeline_rag(pregunta: str, k: int = 5) -> dict:
             "thinking": {}, "query_rag": "", "intervenciones": [], "contexto": "",
             "respuesta": (
                 "😔 Ocurrió un error al procesar tu consulta. "
-                "Por favor intenta reformularla o inténtalo de nuevo en unos segundos.
-
-"
-                f"_Detalle técnico: {str(e)[:200]}_"
+                "Por favor intenta reformularla o inténtalo de nuevo en unos segundos.\n\n"
+                "_Detalle técnico: " + str(e)[:200] + "_"
             )
         }
 
