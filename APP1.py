@@ -4,10 +4,11 @@ import re
 import tempfile
 import numpy as np
 import streamlit as st
-#import google.generativeai as genai
+import google.generativeai as genai
 import faiss
 from openai import OpenAI
 from sentence_transformers import SentenceTransformer
+from audio_recorder_streamlit import audio_recorder
 
 # Importación del módulo de agentes con prompts originales
 from agentes import (
@@ -39,6 +40,12 @@ if not all([GROQ_API_KEY, HF_TOKEN]):
 os.environ["GROQ_API_KEY"] = GROQ_API_KEY
 os.environ["HF_TOKEN"] = HF_TOKEN
 
+# Configuración opcional de Gemini (usado solo para el filtro de pertinencia
+# y la sugerencia proactiva). Si no está presente, esas dos funciones
+# simplemente no se ejecutan (ver los try/except más abajo).
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+
 # PARAMETRIZACIÓN DEL EXPERIMENTO (NVIDIA / MISTRAL POR DEFECTO PARA RAZONAMIENTO)
 PROVIDER_EVALUADO = "groq"
 MODELO_EVALUADO = "llama-3.3-70b-versatile"
@@ -68,7 +75,7 @@ def inicializar_retriever_experimental():
     """
     PATH_INDICE = "rag_index (2).faiss"
     PATH_METADATA = "rag_metadata (2).json"
-    
+
     # Se pasa el ID de Hugging Face del modelo privado tal como requiere SentenceTransformer internamente
     retriever_instancia = NICRetriever(
         index_path=PATH_INDICE,
@@ -84,6 +91,8 @@ retriever = inicializar_retriever_experimental()
 # FILTRO DE RELEVANCIA (AHORRO TOKENS)
 # ==============================
 def validar_pertinencia_clinica(consulta: str) -> bool:
+    if not GEMINI_API_KEY:
+        return True
     prompt_filtro = f"""
     Eres un validador estricto. Determina si la siguiente consulta tiene relación con enfermería, 
     diagnósticos, taxonomía NIC, medicina o cuidados de salud.
@@ -205,12 +214,12 @@ with st.container():
             if sugerencia and sugerencia.lower() != query_rag.lower():
                 with st.spinner("↪️ Solicitando rescate semántico complementario..."):
                     resultados_extra = retriever.buscar(sugerencia, k=5)
-                    
+
                     chunks_existentes = {r.get("chunk_id") for r in pool_resultados}
                     for r in resultados_extra:
                         if r.get("chunk_id") not in chunks_existentes:
                             pool_resultados.append(r)
-                            
+
                     informe_critico = agente_criticar_recuperacion(user_query, pool_resultados, provider=PROVIDER_EVALUADO, model=MODELO_EVALUADO)
                     chunks_aprobados_raw = informe_critico.get("chunks_aprobados", [])
 
@@ -230,7 +239,7 @@ with st.container():
             r for r in pool_resultados 
             if r.get('chunk_id') in validos or r.get('codigo') in validos
         ]
-        
+
         if not contexto_filtrado:
             contexto_filtrado = sorted(pool_resultados, key=lambda x: x['score'])[:3]
 
@@ -240,16 +249,17 @@ with st.container():
         with st.spinner("🎭 Ejecutando Agente Humanizador..."):
             respuesta_humanizada = agente_humanizar_respuesta(plan_tecnico, provider=PROVIDER_EVALUADO)
 
-        with st.spinner("💭 Formulando sugerencia proactiva..."):
-            prompt_proactivo = f"""
-            Basándote en el siguiente plan de cuidados clínico: {plan_tecnico[:800]}
-            Escribe una sola pregunta corta y complementaria para proponerle al usuario si desea información adicional sobre un aspecto crítico del cuidado omitido o relacionado.
-            """
-            try:
-                pregunta_interactiva = genai.GenerativeModel("gemini-2.0-flash").generate_content(prompt_proactivo).text.strip()
-                respuesta_humanizada += f"\n\n---\n💡 **¿Deseas profundizar más?** {pregunta_interactiva}"
-            except Exception:
-                pass
+        if GEMINI_API_KEY:
+            with st.spinner("💭 Formulando sugerencia proactiva..."):
+                prompt_proactivo = f"""
+                Basándote en el siguiente plan de cuidados clínico: {plan_tecnico[:800]}
+                Escribe una sola pregunta corta y complementaria para proponerle al usuario si desea información adicional sobre un aspecto crítico del cuidado omitido o relacionado.
+                """
+                try:
+                    pregunta_interactiva = genai.GenerativeModel("gemini-2.0-flash").generate_content(prompt_proactivo).text.strip()
+                    respuesta_humanizada += f"\n\n---\n💡 **¿Deseas profundizar más?** {pregunta_interactiva}"
+                except Exception:
+                    pass
 
         contexto_mostrable = ""
         for idx, r in enumerate(contexto_filtrado, start=1):
