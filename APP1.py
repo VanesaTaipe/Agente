@@ -4,7 +4,7 @@ import re
 import tempfile
 import numpy as np
 import streamlit as st
-import google.generativeai as genai
+#import google.generativeai as genai
 import faiss
 from openai import OpenAI
 from sentence_transformers import SentenceTransformer
