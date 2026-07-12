@@ -68,7 +68,7 @@ def inicializar_retriever_experimental():
     """
     PATH_INDICE = "rag_index (2).faiss"
     PATH_METADATA = "rag_metadata (2).json"
-    
+
     # Se pasa el ID de Hugging Face del modelo privado tal como requiere SentenceTransformer internamente
     retriever_instancia = NICRetriever(
         index_path=PATH_INDICE,
@@ -81,14 +81,33 @@ def inicializar_retriever_experimental():
 retriever = inicializar_retriever_experimental()
 
 # ==============================
+# FILTRO RÁPIDO DE MENSAJES TRIVIALES (SIN LLM, SIN LATENCIA)
+# ==============================
+SALUDOS_TRIVIALES = {
+    "hola", "buenas", "buenos dias", "buenos días", "buenas tardes",
+    "buenas noches", "hey", "hi", "hello", "que tal", "qué tal",
+    "gracias", "ok", "vale", "adios", "adiós", "chau", "salu2",
+    "buen dia", "buen día", "saludos", "que onda", "qué onda"
+}
+
+def es_mensaje_trivial(consulta: str) -> bool:
+    """
+    Detecta saludos y mensajes triviales sin necesidad de invocar ningún LLM.
+    Corta el pipeline antes de gastar tokens o generar latencia innecesaria.
+    """
+    texto = consulta.strip().lower()
+    texto = re.sub(r'[¡!¿?.,]', '', texto)
+    return texto in SALUDOS_TRIVIALES or len(texto) <= 3
+
+# ==============================
 # FILTRO DE RELEVANCIA (AHORRO TOKENS)
 # ==============================
 def validar_pertinencia_clinica(consulta: str) -> bool:
     prompt_filtro = f"""
-    Eres un validador estricto. Determina si la siguiente consulta tiene relación con enfermería, 
+    Eres un validador estricto. Determina si la siguiente consulta tiene relación con enfermería,
     diagnósticos, taxonomía NIC, medicina o cuidados de salud.
     Responde únicamente con 'SI' si guarda relación o 'NO' si es totalmente ajena.
-    
+
     Consulta: "{consulta}"
     """
     try:
@@ -96,14 +115,16 @@ def validar_pertinencia_clinica(consulta: str) -> bool:
         resp = model.generate_content(prompt_filtro).text.strip().upper()
         return "SI" in resp
     except Exception:
-        return True
+        # Fail-safe: si el validador falla, rechazamos por defecto en vez de
+        # dejar pasar cualquier cosa al pipeline completo de Groq.
+        return False
 
 # ==============================
 # TRANSCRIPCIÓN CON OPENAI WHISPER
 # ==============================
 def transcribir_audio_openai(audio_bytes: bytes) -> str:
     try:
-        openai_client = OpenAI() 
+        openai_client = OpenAI()
         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
             tmp.write(audio_bytes)
             tmp_path = tmp.name
@@ -169,98 +190,108 @@ with st.container():
     if len(st.session_state.messages) > 0 and st.session_state.messages[-1]["role"] == "user":
         user_query = st.session_state.messages[-1]["content"]
 
-        if not validar_pertinencia_clinica(user_query):
+        # --- 1) Corte inmediato para saludos/mensajes triviales, sin tocar ningún LLM ---
+        if es_mensaje_trivial(user_query):
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": "👋 ¡Hola! Cuéntame el caso clínico o la duda sobre intervenciones NIC en la que quieras que te ayude."
+            })
+            st.rerun()
+
+        # --- 2) Filtro de pertinencia clínica (solo si no fue un mensaje trivial) ---
+        elif not validar_pertinencia_clinica(user_query):
             st.session_state.messages.append({
                 "role": "assistant",
                 "content": "❌ No estoy especializado para responder consultas ajenas al ámbito de la enfermería, medicina o la taxonomía de intervenciones NIC."
             })
             st.rerun()
 
-        with st.spinner("🧠 Ejecutando Agente Reformulador..."):
-            reformulacion = agente_reformular_consulta(user_query, provider=PROVIDER_EVALUADO, model=MODELO_EVALUADO)
-            query_rag = reformulacion.get("query_rag_final", user_query)
-            datos_faltantes = reformulacion.get("datos_faltantes", [])
+        else:
+            with st.spinner("🧠 Ejecutando Agente Reformulador..."):
+                reformulacion = agente_reformular_consulta(user_query, provider=PROVIDER_EVALUADO, model=MODELO_EVALUADO)
+                query_rag = reformulacion.get("query_rag_final", user_query)
+                datos_faltantes = reformulacion.get("datos_faltantes", [])
 
-        if datos_faltantes:
-            vicios_texto = ", ".join(datos_faltantes)
+            if datos_faltantes:
+                vicios_texto = ", ".join(datos_faltantes)
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": f"🩺 Para estructurar adecuadamente las intervenciones NIC, requiero información adicional. ¿Podrías especificar detalles sobre: **{vicios_texto}**?"
+                })
+                st.rerun()
+
+            with st.spinner("🔍 Realizando match vectorial en base de conocimiento..."):
+                pool_resultados = retriever.buscar(query_rag, k=10)  # k=10 para máxima profundidad semántica
+                if not pool_resultados:
+                    pool_resultados = retriever.buscar(user_query, k=10)
+
+            with st.spinner("⚖️ Ejecutando Agente Crítico de Integridad..."):
+                informe_critico = agente_criticar_recuperacion(user_query, pool_resultados, provider=PROVIDER_EVALUADO, model=MODELO_EVALUADO)
+                chunks_aprobados_raw = informe_critico.get("chunks_aprobados", [])
+                necesita_mas_busqueda = informe_critico.get("necesita_mas_busqueda", False)
+
+            # Bucle iterativo adaptado del script de evaluación
+            if necesita_mas_busqueda and informe_critico.get("sugerencia_mejora"):
+                sugerencia = informe_critico.get("sugerencia_mejora", "").strip()
+                if sugerencia and sugerencia.lower() != query_rag.lower():
+                    with st.spinner("↪️ Solicitando rescate semántico complementario..."):
+                        resultados_extra = retriever.buscar(sugerencia, k=5)
+
+                        chunks_existentes = {r.get("chunk_id") for r in pool_resultados}
+                        for r in resultados_extra:
+                            if r.get("chunk_id") not in chunks_existentes:
+                                pool_resultados.append(r)
+
+                        informe_critico = agente_criticar_recuperacion(user_query, pool_resultados, provider=PROVIDER_EVALUADO, model=MODELO_EVALUADO)
+                        chunks_aprobados_raw = informe_critico.get("chunks_aprobados", [])
+
+            # Sanitización estricta de regex para limpiar los chunk_ids seleccionados
+            validos = []
+            for item in chunks_aprobados_raw:
+                item_str = str(item).strip()
+                match = re.search(r'\d{4}_\d+', item_str)
+                if match:
+                    validos.append(match.group())
+                else:
+                    clean = re.sub(r'[^\d_]', '', item_str)
+                    if clean:
+                        validos.append(clean)
+
+            contexto_filtrado = [
+                r for r in pool_resultados
+                if r.get('chunk_id') in validos or r.get('codigo') in validos
+            ]
+
+            if not contexto_filtrado:
+                contexto_filtrado = sorted(pool_resultados, key=lambda x: x['score'])[:3]
+
+            with st.spinner("✍️ Ejecutando Agente Sintetizador..."):
+                plan_tecnico = agente_sintetizar_recomendacion(user_query, contexto_filtrado, provider=PROVIDER_EVALUADO, model=MODELO_EVALUADO)
+
+            with st.spinner("🎭 Ejecutando Agente Humanizador..."):
+                respuesta_humanizada = agente_humanizar_respuesta(plan_tecnico, provider=PROVIDER_EVALUADO)
+
+            with st.spinner("💭 Formulando sugerencia proactiva..."):
+                prompt_proactivo = f"""
+                Basándote en el siguiente plan de cuidados clínico: {plan_tecnico[:800]}
+                Escribe una sola pregunta corta y complementaria para proponerle al usuario si desea información adicional sobre un aspecto crítico del cuidado omitido o relacionado.
+                """
+                try:
+                    pregunta_interactiva = genai.GenerativeModel("gemini-2.0-flash").generate_content(prompt_proactivo).text.strip()
+                    respuesta_humanizada += f"\n\n---\n💡 **¿Deseas profundizar más?** {pregunta_interactiva}"
+                except Exception:
+                    pass
+
+            contexto_mostrable = ""
+            for idx, r in enumerate(contexto_filtrado, start=1):
+                contexto_mostrable += f"🔹 Fragmento {idx} | Código: {r['codigo']} | Intervención: {r['nombre']} | Chunk ID: {r.get('chunk_id')} (Score={r['score']})\n{r['texto_completo']}\n\n"
+
             st.session_state.messages.append({
                 "role": "assistant",
-                "content": f"🩺 Para estructurar adecuadamente las intervenciones NIC, requiero información adicional. ¿Podrías especificar detalles sobre: **{vicios_texto}**?"
+                "content": respuesta_humanizada,
+                "context": contexto_mostrable
             })
             st.rerun()
-
-        with st.spinner("🔍 Realizando match vectorial en base de conocimiento..."):
-            pool_resultados = retriever.buscar(query_rag, k=10) # Ajustado a k=10 para máxima profundidad semántica como en tu test
-            if not pool_resultados:
-                pool_resultados = retriever.buscar(user_query, k=10)
-
-        with st.spinner("⚖️ Ejecutando Agente Crítico de Integridad..."):
-            informe_critico = agente_criticar_recuperacion(user_query, pool_resultados, provider=PROVIDER_EVALUADO, model=MODELO_EVALUADO)
-            chunks_aprobados_raw = informe_critico.get("chunks_aprobados", [])
-            necesita_mas_busqueda = informe_critico.get("necesita_mas_busqueda", False)
-
-        # Bucle iterativo adaptado del script de evaluación
-        if necesita_mas_busqueda and informe_critico.get("sugerencia_mejora"):
-            sugerencia = informe_critico.get("sugerencia_mejora", "").strip()
-            if sugerencia and sugerencia.lower() != query_rag.lower():
-                with st.spinner("↪️ Solicitando rescate semántico complementario..."):
-                    resultados_extra = retriever.buscar(sugerencia, k=5)
-                    
-                    chunks_existentes = {r.get("chunk_id") for r in pool_resultados}
-                    for r in resultados_extra:
-                        if r.get("chunk_id") not in chunks_existentes:
-                            pool_resultados.append(r)
-                            
-                    informe_critico = agente_criticar_recuperacion(user_query, pool_resultados, provider=PROVIDER_EVALUADO, model=MODELO_EVALUADO)
-                    chunks_aprobados_raw = informe_critico.get("chunks_aprobados", [])
-
-        # Sanitización estricta de regex para limpiar los chunk_ids seleccionados
-        validos = []
-        for item in chunks_aprobados_raw:
-            item_str = str(item).strip()
-            match = re.search(r'\d{4}_\d+', item_str)
-            if match:
-                validos.append(match.group())
-            else:
-                clean = re.sub(r'[^\d_]', '', item_str)
-                if clean:
-                    validos.append(clean)
-
-        contexto_filtrado = [
-            r for r in pool_resultados 
-            if r.get('chunk_id') in validos or r.get('codigo') in validos
-        ]
-        
-        if not contexto_filtrado:
-            contexto_filtrado = sorted(pool_resultados, key=lambda x: x['score'])[:3]
-
-        with st.spinner("✍️ Ejecutando Agente Sintetizador..."):
-            plan_tecnico = agente_sintetizar_recomendacion(user_query, contexto_filtrado, provider=PROVIDER_EVALUADO, model=MODELO_EVALUADO)
-
-        with st.spinner("🎭 Ejecutando Agente Humanizador..."):
-            respuesta_humanizada = agente_humanizar_respuesta(plan_tecnico, provider=PROVIDER_EVALUADO)
-
-        with st.spinner("💭 Formulando sugerencia proactiva..."):
-            prompt_proactivo = f"""
-            Basándote en el siguiente plan de cuidados clínico: {plan_tecnico[:800]}
-            Escribe una sola pregunta corta y complementaria para proponerle al usuario si desea información adicional sobre un aspecto crítico del cuidado omitido o relacionado.
-            """
-            try:
-                pregunta_interactiva = genai.GenerativeModel("gemini-2.0-flash").generate_content(prompt_proactivo).text.strip()
-                respuesta_humanizada += f"\n\n---\n💡 **¿Deseas profundizar más?** {pregunta_interactiva}"
-            except Exception:
-                pass
-
-        contexto_mostrable = ""
-        for idx, r in enumerate(contexto_filtrado, start=1):
-            contexto_mostrable += f"🔹 Fragmento {idx} | Código: {r['codigo']} | Intervención: {r['nombre']} | Chunk ID: {r.get('chunk_id')} (Score={r['score']})\n{r['texto_completo']}\n\n"
-
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": respuesta_humanizada,
-            "context": contexto_mostrable
-        })
-        st.rerun()
 
 # ==============================
 # INPUTS DE CONTROL DE USUARIO
