@@ -40,11 +40,7 @@ if not all([GROQ_API_KEY, HF_TOKEN]):
 os.environ["GROQ_API_KEY"] = GROQ_API_KEY
 os.environ["HF_TOKEN"] = HF_TOKEN
 
-# Configuración opcional de Gemini (usado solo para el filtro de pertinencia
-# y la sugerencia proactiva). Si no está presente, esas dos funciones
-# simplemente no se ejecutan (ver los try/except más abajo).
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+
 
 # PARAMETRIZACIÓN DEL EXPERIMENTO (NVIDIA / MISTRAL POR DEFECTO PARA RAZONAMIENTO)
 PROVIDER_EVALUADO = "groq"
