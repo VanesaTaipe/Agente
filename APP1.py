@@ -249,17 +249,7 @@ with st.container():
         with st.spinner("🎭 Ejecutando Agente Humanizador..."):
             respuesta_humanizada = agente_humanizar_respuesta(plan_tecnico, provider=PROVIDER_EVALUADO)
 
-        if GEMINI_API_KEY:
-            with st.spinner("💭 Formulando sugerencia proactiva..."):
-                prompt_proactivo = f"""
-                Basándote en el siguiente plan de cuidados clínico: {plan_tecnico[:800]}
-                Escribe una sola pregunta corta y complementaria para proponerle al usuario si desea información adicional sobre un aspecto crítico del cuidado omitido o relacionado.
-                """
-                try:
-                    pregunta_interactiva = genai.GenerativeModel("gemini-2.0-flash").generate_content(prompt_proactivo).text.strip()
-                    respuesta_humanizada += f"\n\n---\n💡 **¿Deseas profundizar más?** {pregunta_interactiva}"
-                except Exception:
-                    pass
+       
 
         contexto_mostrable = ""
         for idx, r in enumerate(contexto_filtrado, start=1):
