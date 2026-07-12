@@ -1,17 +1,13 @@
 import os
 import json
-import pickle
+import re
 import tempfile
 import numpy as np
 import streamlit as st
 import google.generativeai as genai
 import faiss
 from openai import OpenAI
-from langchain.docstore.document import Document
-from langchain.docstore import InMemoryDocstore
-from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from audio_recorder_streamlit import audio_recorder
+from sentence_transformers import SentenceTransformer
 
 # Importación del módulo de agentes con prompts originales
 from agentes import (
@@ -27,22 +23,21 @@ from agentes import (
 # ==============================
 st.set_page_config(page_title="Asistente NIC Multi-Agente", page_icon="🩺", layout="wide")
 
-# API Keys desde Secrets
-GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY")
-OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY")
-GROQ_API_KEY = st.secrets.get("GROQ_API_KEY")
+# CONFIGURACIÓN DE TU MODELO PRIVADO DE HUGGING FACE
+# El embedding E5 permanece fijo e invariable para mantener el rigor del experimento
+MI_MODELO_PRIVADO_HF =  "vanesam123/Modelo-Funnintg",
 
-if not all([GEMINI_API_KEY, OPENAI_API_KEY, GROQ_API_KEY]):
-    st.error("⚠️ Faltan API Keys requeridas en Streamlit Secrets (GEMINI_API_KEY, OPENAI_API_KEY y GROQ_API_KEY).")
+# API Keys desde Secrets
+GROQ_API_KEY = st.secrets.get("GROQ_API_KEY")
+HF_TOKEN = st.secrets.get("HF_TOKEN")
+
+if not all([GROQ_API_KEY, HF_TOKEN]):
+    st.error("⚠️ Faltan API Keys requeridas en Streamlit Secrets (GROQ_API_KEY y HF_TOKEN).")
     st.stop()
 
-# Configuración global de Variables de Entorno para el motor
+# Configuración global de Variables de Entorno para los motores de inferencia
 os.environ["GROQ_API_KEY"] = GROQ_API_KEY
-os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
-os.environ["GEMINI_API_KEY"] = GEMINI_API_KEY
-
-genai.configure(api_key=GEMINI_API_KEY)
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
+os.environ["HF_TOKEN"] = HF_TOKEN
 
 # PARAMETRIZACIÓN DEL EXPERIMENTO (NVIDIA / MISTRAL POR DEFECTO PARA RAZONAMIENTO)
 PROVIDER_EVALUADO = "groq"
@@ -63,54 +58,35 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==============================
-# CARGAR VECTORSTORE COMPLETO
+# CARGAR RETRIEVER EXPERIMENTAL (CORREGIDO)
 # ==============================
 @st.cache_resource(show_spinner=False)
-def cargar_vectorstore_desde_archivos():
-    index = faiss.read_index("indice_faiss.index")
-    with open("metadata.pkl", "rb") as f:
-        metadata = pickle.load(f)
-    with open("chunks_con_headers.pkl", "rb") as f:
-        textos = pickle.load(f)
-
-    embedding_model = HuggingFaceEmbeddings(model_name="intfloat/multilingual-e5-large")
-     
-    documentos = []
-    for i, t in enumerate(textos):
-        contenido = f"[{t.get('seccion', 'Sin sección')}] {t.get('texto', '')}" if isinstance(t, dict) else str(t)
-        meta = metadata[i] if i < len(metadata) else {}
-        documentos.append(Document(page_content=contenido, metadata=meta))
-
-    docstore_items = {}
-    index_to_docstore_id = {}
-    for i, doc in enumerate(documentos):
-        doc_id = f"doc_{i}"
-        docstore_items[doc_id] = doc
-        index_to_docstore_id[i] = doc_id
+def inicializar_retriever_experimental():
+    """
+    Inicializa el NICRetriever utilizando la lógica rigurosa de tu tesis,
+    enlazando directamente el índice FAISS nativo y los archivos correspondientes.
+    """
+    PATH_INDICE = "rag_index (2).faiss"
+    PATH_METADATA = "rag_metadata (2).json"
     
-    docstore = InMemoryDocstore(docstore_items)
-    vectorstore = FAISS(
-        embedding_function=embedding_model.embed_query,
-        index=index,
-        docstore=docstore,
-        index_to_docstore_id=index_to_docstore_id
+    # Se pasa el ID de Hugging Face del modelo privado tal como requiere SentenceTransformer internamente
+    retriever_instancia = NICRetriever(
+        index_path=PATH_INDICE,
+        metadata_path=PATH_METADATA,
+        model_path=MI_MODELO_PRIVADO_HF
     )
-    return vectorstore
+    return retriever_instancia
 
-vectorstore = cargar_vectorstore_desde_archivos()
-retriever = NICRetriever(vectorstore.index, vectorstore.docstore, vectorstore)
+# Instanciamos el motor idéntico a tu pipeline de Kaggle
+retriever = inicializar_retriever_experimental()
 
 # ==============================
 # FILTRO DE RELEVANCIA (AHORRO TOKENS)
 # ==============================
 def validar_pertinencia_clinica(consulta: str) -> bool:
-    """
-    Evalúa de forma rápida si la consulta pertenece al área de enfermería o medicina,
-    evitando que se llame a la cadena entera de agentes si el usuario pregunta algo no relacionado.
-    """
     prompt_filtro = f"""
     Eres un validador estricto. Determina si la siguiente consulta tiene relación con enfermería, 
-    diagnósticos, taxonomía NIC, medicina o casos de cuidados de salud.
+    diagnósticos, taxonomía NIC, medicina o cuidados de salud.
     Responde únicamente con 'SI' si guarda relación o 'NO' si es totalmente ajena.
     
     Consulta: "{consulta}"
@@ -127,6 +103,7 @@ def validar_pertinencia_clinica(consulta: str) -> bool:
 # ==============================
 def transcribir_audio_openai(audio_bytes: bytes) -> str:
     try:
+        openai_client = OpenAI() 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
             tmp.write(audio_bytes)
             tmp_path = tmp.name
@@ -166,7 +143,6 @@ st.markdown("""
 # ==============================
 # ÁREA DE CHAT (RESTRICCIÓN A ÚLTIMOS 5 MENSAJES)
 # ==============================
-# Obtenemos únicamente los últimos 5 mensajes de la sesión para limitar la ventana de contexto
 mensajes_historial = st.session_state.messages[-5:]
 
 with st.container():
@@ -178,7 +154,6 @@ with st.container():
                 with st.expander("🔍 Ver chunks y trazabilidad de evidencia utilizados", expanded=False):
                     st.markdown(f"```\n{msg['context']}\n```")
 
-    # Procesar entrada por micrófono
     if st.session_state.pending_audio is not None:
         with st.spinner("🎤 Transcribiendo audio con OpenAI Whisper..."):
             transcribed_text = transcribir_audio_openai(st.session_state.pending_audio)
@@ -191,11 +166,9 @@ with st.container():
         else:
             st.session_state.pending_audio = None
 
-    # Si el último mensaje es del usuario, ejecutar el pipeline completo
     if len(st.session_state.messages) > 0 and st.session_state.messages[-1]["role"] == "user":
         user_query = st.session_state.messages[-1]["content"]
 
-        # GUARDARAIL: Validar pertinencia clínica inmediata para ahorro estricto de tokens
         if not validar_pertinencia_clinica(user_query):
             st.session_state.messages.append({
                 "role": "assistant",
@@ -203,13 +176,11 @@ with st.container():
             })
             st.rerun()
 
-        # FASE 1: Agente Reformulador
         with st.spinner("🧠 Ejecutando Agente Reformulador..."):
             reformulacion = agente_reformular_consulta(user_query, provider=PROVIDER_EVALUADO, model=MODELO_EVALUADO)
             query_rag = reformulacion.get("query_rag_final", user_query)
             datos_faltantes = reformulacion.get("datos_faltantes", [])
 
-        # BUCLE DE PREGUNTA: Si faltan datos clínicos para evaluar la taxonomía, se le pregunta al usuario
         if datos_faltantes:
             vicios_texto = ", ".join(datos_faltantes)
             st.session_state.messages.append({
@@ -218,39 +189,57 @@ with st.container():
             })
             st.rerun()
 
-        # FASE 2: Búsqueda Vectorial (Retriever Recall k=5)
         with st.spinner("🔍 Realizando match vectorial en base de conocimiento..."):
-            pool_resultados = retriever.buscar(query_rag, k=5)
+            pool_resultados = retriever.buscar(query_rag, k=10) # Ajustado a k=10 para máxima profundidad semántica como en tu test
+            if not pool_resultados:
+                pool_resultados = retriever.buscar(user_query, k=10)
 
-        # FASE 3: Agente Crítico de Integridad
         with st.spinner("⚖️ Ejecutando Agente Crítico de Integridad..."):
             informe_critico = agente_criticar_recuperacion(user_query, pool_resultados, provider=PROVIDER_EVALUADO, model=MODELO_EVALUADO)
-            chunks_aprobados = informe_critico.get("chunks_aprobados", [])
+            chunks_aprobados_raw = informe_critico.get("chunks_aprobados", [])
             necesita_mas_busqueda = informe_critico.get("necesita_mas_busqueda", False)
 
-        # Bucle de re-búsqueda conceptual si el crítico lo solicita
+        # Bucle iterativo adaptado del script de evaluación
         if necesita_mas_busqueda and informe_critico.get("sugerencia_mejora"):
-            with st.spinner("↪️ Solicitando rescate semántico complementario..."):
-                resultados_extra = retriever.buscar(informe_critico["sugerencia_mejora"], k=3)
-                pool_resultados.extend(resultados_extra)
-                # Re-evaluar pool ampliado
-                informe_critico = agente_criticar_recuperacion(user_query, pool_resultados, provider=PROVIDER_EVALUADO, model=MODELO_EVALUADO)
-                chunks_aprobados = informe_critico.get("chunks_aprobados", [])
+            sugerencia = informe_critico.get("sugerencia_mejora", "").strip()
+            if sugerencia and sugerencia.lower() != query_rag.lower():
+                with st.spinner("↪️ Solicitando rescate semántico complementario..."):
+                    resultados_extra = retriever.buscar(sugerencia, k=5)
+                    
+                    chunks_existentes = {r.get("chunk_id") for r in pool_resultados}
+                    for r in resultados_extra:
+                        if r.get("chunk_id") not in chunks_existentes:
+                            pool_resultados.append(r)
+                            
+                    informe_critico = agente_criticar_recuperacion(user_query, pool_resultados, provider=PROVIDER_EVALUADO, model=MODELO_EVALUADO)
+                    chunks_aprobados_raw = informe_critico.get("chunks_aprobados", [])
 
-        # Filtrado basado estrictamente en las decisiones del Crítico
-        contexto_filtrado = [r for r in pool_resultados if r.get('chunk_id') in chunks_aprobados]
+        # Sanitización estricta de regex para limpiar los chunk_ids seleccionados
+        validos = []
+        for item in chunks_aprobados_raw:
+            item_str = str(item).strip()
+            match = re.search(r'\d{4}_\d+', item_str)
+            if match:
+                validos.append(match.group())
+            else:
+                clean = re.sub(r'[^\d_]', '', item_str)
+                if clean:
+                    validos.append(clean)
+
+        contexto_filtrado = [
+            r for r in pool_resultados 
+            if r.get('chunk_id') in validos or r.get('codigo') in validos
+        ]
+        
         if not contexto_filtrado:
             contexto_filtrado = sorted(pool_resultados, key=lambda x: x['score'])[:3]
 
-        # FASE 4: Agente Sintetizador (Plan Técnico Grounded)
         with st.spinner("✍️ Ejecutando Agente Sintetizador..."):
             plan_tecnico = agente_sintetizar_recomendacion(user_query, contexto_filtrado, provider=PROVIDER_EVALUADO, model=MODELO_EVALUADO)
 
-        # FASE 5: Capa de Narrativa (Humanizador)
         with st.spinner("🎭 Ejecutando Agente Humanizador..."):
             respuesta_humanizada = agente_humanizar_respuesta(plan_tecnico, provider=PROVIDER_EVALUADO)
 
-        # PREGUNTAR INFORMACIÓN ADICIONAL PROACTIVA (De acuerdo al tema que preguntó)
         with st.spinner("💭 Formulando sugerencia proactiva..."):
             prompt_proactivo = f"""
             Basándote en el siguiente plan de cuidados clínico: {plan_tecnico[:800]}
@@ -262,10 +251,9 @@ with st.container():
             except Exception:
                 pass
 
-        # Formatear traza mostrable
         contexto_mostrable = ""
         for idx, r in enumerate(contexto_filtrado, start=1):
-            contexto_mostrable += f"🔹 Fragmento {idx} | Código: {r['codigo']} | Intervención: {r['nombre']} (Score={r['score']})\n{r['texto_completo']}\n\n"
+            contexto_mostrable += f"🔹 Fragmento {idx} | Código: {r['codigo']} | Intervención: {r['nombre']} | Chunk ID: {r.get('chunk_id')} (Score={r['score']})\n{r['texto_completo']}\n\n"
 
         st.session_state.messages.append({
             "role": "assistant",
@@ -295,7 +283,6 @@ if user_input:
     st.session_state.messages.append({"role": "user", "content": user_input})
     st.rerun()
 
-# Botón inferior para reiniciar la conversación
 st.markdown("---")
 st.caption("⚕️ Este sistema es solo de apoyo metodológico y no sustituye la valoración clínica profesional.")
 
