@@ -25,7 +25,7 @@ st.set_page_config(page_title="Asistente NIC Multi-Agente", page_icon="🩺", la
 
 # CONFIGURACIÓN DE TU MODELO PRIVADO DE HUGGING FACE
 # El embedding E5 permanece fijo e invariable para mantener el rigor del experimento
-MI_MODELO_PRIVADO_HF =  "vanesam123/Modelo-Funnintg",
+MI_MODELO_PRIVADO_HF =  "vanesam123/Modelo-Funnintg"
 
 # API Keys desde Secrets
 GROQ_API_KEY = st.secrets.get("GROQ_API_KEY")
