@@ -1,14 +1,10 @@
 streamlit
 groq
-google-genai
+google-generativeai
 openai
-anthropic
 sentence-transformers
 faiss-cpu
 audio-recorder-streamlit
-langchain
-langchain-community
 numpy
 requests
-google-generativeai
 torch
