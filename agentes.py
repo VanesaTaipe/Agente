@@ -23,7 +23,7 @@ def verificar_dependencias():
         import sentence_transformers
     except ImportError:
         librerias_faltantes.append("sentence-transformers")
-        
+
     if librerias_faltantes:
         print("\n" + "="*80)
         print("🚨 [ERROR DE DEPENDENCIAS] Faltan librerías críticas en tu entorno de ejecución.")
@@ -40,7 +40,7 @@ verificar_dependencias()
 # ==========================================================
 def call_llm(prompt_sistema: str, prompt_usuario: str, provider: str = "groq", model_name: Optional[str] = None) -> str:
     temperature = 0.0
-    
+
     if provider == "groq":
         from groq import Groq
         client = Groq(api_key=os.getenv("GROQ_API_KEY"))
@@ -75,7 +75,7 @@ def call_llm_with_retry(prompt_sistema: str, prompt_usuario: str, provider: str 
                     extracted_wait = (hours * 3600) + (minutes * 60) + seconds
                     if extracted_wait > 0:
                         wait_time = int(extracted_wait) + 3
-                
+
                 print(f"   ⏳ [Rate Limit 429] Límite en {provider}. Esperando {wait_time}s antes de reintentar...")
                 time.sleep(wait_time)
             else:
@@ -87,7 +87,7 @@ def parse_json_robust(texto_crudo: str) -> Dict[str, Any]:
     texto_limpio = texto_crudo.strip()
     if "{" in texto_limpio:
         texto_limpio = texto_limpio[texto_limpio.find("{"):texto_limpio.rfind("}")+1]
-    
+
     try:
         return json.loads(texto_limpio)
     except Exception:
@@ -168,7 +168,7 @@ REGLA DE MEJORA METODOLÓGICA (NORMALIZACIÓN LÉXICA):
 
 No agregues conceptos nuevos.
 
-No reemplaces términos por otros más técnicos si estos no aparecen explícitamente in el texto original (excepto para la normalización de lenguaje coloquial descrita arriba).
+No reemplaces términos por otros más técnicos si estos no aparecen explícitamente en el texto original (excepto para la normalización de lenguaje coloquial descrita arriba).
 
 No generes sinónimos clínicos especulativos o que reorienten la búsqueda.
 
@@ -211,126 +211,52 @@ def agente_reformular_consulta(query_usuario: str, provider: str = "groq", model
         model_name=model
     )
     resultado = parse_json_robust(respuesta_raw)
-    
+
     query_text = resultado.get("query_rag", query_usuario)
     if not query_text.lower().startswith("query: "):
         resultado["query_rag_final"] = f"query: {query_text}"
     else:
         resultado["query_rag_final"] = query_text
-        
+
     resultado["_raw_response"] = respuesta_raw
     return resultado
 
 
 # ==========================================================
-# 3. MOTOR DE RECUPERACIÓN VECTORIAL (RETRIEVER ADAPTADO)
+# 3. MOTOR DE RECUPERACIÓN VECTORIAL (RETRIEVER)
 # ==========================================================
+import faiss
+import numpy as np
+from sentence_transformers import SentenceTransformer
+
 class NICRetriever:
-    """
-    Componente modificado para aceptar la inicialización clásica de producción
-    basada en rutas o repositorios remotos privados de Hugging Face de forma segura.
-    """
-    def __init__(self, index=None, metadata=None, embedding_model=None, index_path=None, metadata_path=None, model_path=None):
-        # Escenario A: Inicialización desde la App de Streamlit por objetos (LangChain vectorstore)
-        if index is not None and embedding_model is not None:
-            self.index = index
-            self.metadata = metadata
-            self.embedding_model = embedding_model
-            self.es_modo_langchain = True
-        
-        # Escenario B: Inicialización clásica por rutas o Repositorios Remotos de HF (Evita el ValueError)
-        elif index_path is not None and metadata_path is not None and model_path is not None:
-            import faiss
-            from sentence_transformers import SentenceTransformer
-            
-            print("📂 [Retriever] Cargando motor nativo FAISS conectando con Hugging Face...")
-            self.index = faiss.read_index(index_path)
-            self.es_modo_langchain = False
-            
-            # Recuperamos el token de entorno configurado de forma segura
-            hf_token_seguro = os.getenv("HF_TOKEN")
-            
-            # Descargamos el modelo desde Hugging Face usando el token de autenticación
-            self.embedding_model = SentenceTransformer(
-                model_path,
-                model_kwargs={"token": hf_token_seguro}
-            )
-            
-            with open(metadata_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                
-            self.metadata = {}
-            self.order = []
-            
-            if isinstance(data, list):
-                for item in data:
-                    doc_id = str(item.get("id", len(self.order)))
-                    codigo_raw = item.get("codigo", "")
-                    try:
-                        codigo = str(int(float(codigo_raw))).zfill(4)
-                    except Exception:
-                        codigo = str(codigo_raw).strip().zfill(4)
-                        
-                    self.metadata[doc_id] = {
-                        "codigo": codigo,
-                        "nombre": item.get("nombre", "Intervención NIC"),
-                        "chunk_num": item.get("chunk_num"),
-                        "chunk_id": item.get("chunk_id"),
-                        "texto_completo": item.get("texto", "")
-                    }
-                    self.order.append(doc_id)
-            elif isinstance(data, dict):
-                self.metadata = data.get("mapping", {})
-                self.order = data.get("order", [])
+    def __init__(self, index_path: str, metadata_path: str, model_path: str):
+        self.index = faiss.read_index(index_path)
+        with open(metadata_path, "r", encoding="utf-8") as f:
+            self.metadata = json.load(f)
+        self.embedding_model = SentenceTransformer(model_path)
 
     def buscar(self, query_rag: str, k: int = 5) -> List[Dict]:
         q_text = query_rag if query_rag.lower().startswith("query: ") else f"query: {query_rag}"
+
+        query_vec = self.embedding_model.encode([q_text], normalize_embeddings=True)
+        query_vec = np.array(query_vec, dtype="float32")
+
+        scores, indices = self.index.search(query_vec, k)
+
         pool = []
-        
-        if getattr(self, "es_modo_langchain", True):
-            # Modo Streamlit / Langchain Vectorstore wrapper
-            resultados = self.embedding_model.similarity_search_with_score(q_text, k=k)
-            for i, (doc, score) in enumerate(resultados):
-                pool.append({
-                    "codigo": doc.metadata.get("codigo", "0000"),
-                    "nombre": doc.metadata.get("nombre", "Intervención NIC"),
-                    "chunk_num": doc.metadata.get("chunk_num", i),
-                    "chunk_id": doc.metadata.get("chunk_id", f"{doc.metadata.get('codigo', '0000')}_{i}"),
-                    "texto_completo": doc.page_content,
-                    "score": round(float(score), 4)
-                })
-        else:
-            # Modo Kaggle / Inferencia nativa remota con SentenceTransformer
-            q_emb = self.embedding_model.encode([q_text], normalize_embeddings=True, convert_to_numpy=True).astype("float32")
-            scores, indices = self.index.search(q_emb, k)
-            for i, idx in enumerate(indices[0]):
-                if idx == -1: continue
-                score = round(float(scores[0][i]), 4)
-                
-                if idx < len(self.order):
-                    key = self.order[idx]
-                    if key in self.metadata:
-                        meta = self.metadata[key]
-                        pool.append({
-                            "codigo": meta["codigo"],
-                            "nombre": meta["nombre"],
-                            "chunk_num": meta.get("chunk_num"),
-                            "chunk_id": meta.get("chunk_id"),
-                            "texto_completo": meta["texto_completo"],
-                            "score": score
-                        })
-                else:
-                    str_idx = str(idx).zfill(4)
-                    if str_idx in self.metadata:
-                        meta = self.metadata[str_idx]
-                        pool.append({
-                            "codigo": meta["codigo"],
-                            "nombre": meta["nombre"],
-                            "chunk_num": meta.get("chunk_num"),
-                            "chunk_id": meta.get("chunk_id"),
-                            "texto_completo": meta["texto_completo"],
-                            "score": score
-                        })
+        for score, idx in zip(scores[0], indices[0]):
+            if idx == -1:
+                continue
+            meta = self.metadata[idx] if isinstance(self.metadata, list) else self.metadata[str(idx)]
+            pool.append({
+                "codigo": meta.get("codigo", "0000"),
+                "nombre": meta.get("nombre", "Intervención NIC"),
+                "chunk_num": meta.get("chunk_num", idx),
+                "chunk_id": meta.get("chunk_id", f"{meta.get('codigo', '0000')}_{idx}"),
+                "texto_completo": meta.get("texto_completo", meta.get("texto", "")),
+                "score": round(float(score), 4)
+            })
         return pool
 
 
@@ -362,22 +288,22 @@ La salida debe ser únicamente un JSON válido con la siguiente estructura:
 def agente_criticar_recuperacion(query_original: str, resultados: List[Dict], provider: str = "groq", model: Optional[str] = None) -> Dict:
     if not resultados:
         return {
-            "necesita_mas_busqueda": True, 
-            "chunks_aprobados": [], 
-            "conceptos_cubiertos": [], 
+            "necesita_mas_busqueda": True,
+            "chunks_aprobados": [],
+            "conceptos_cubiertos": [],
             "conceptos_faltantes": [query_original],
             "sugerencia_mejora": query_original
         }
     print(f"⚖️ [Agente Crítico - {provider}] Evaluando equilibrio e integridad del contexto...")
-    
+
     contexto_str = ""
     for r in resultados:
         contexto_str += f"--- Chunk ID: {r.get('chunk_id')} ---\n"
         contexto_str += f"Intervención: {r.get('nombre')}\n"
         contexto_str += f"Contenido del Chunk:\n{r.get('texto_completo')[:1200]}\n\n"
-        
+
     user_prompt = f"CASO ORIGINAL / PREGUNTA: {query_original}\n\nFRAGMENTOS (CHUNKS) RECUPERADOS EN LA BASE VECTORIAL:\n{contexto_str}"
-    
+
     respuesta_raw = call_llm_with_retry(
         prompt_sistema=PROMPT_CRITICO,
         prompt_usuario=user_prompt,
@@ -417,9 +343,9 @@ def agente_sintetizar_recomendacion(query_original: str, contexto_depurado: List
     contexto_str = ""
     for doc in contexto_depurado:
         contexto_str += f"--- CÓDIGO {doc['codigo']}\nChunk {doc.get('chunk_num')}\nIntervención {doc['nombre']}\n---\n\n{doc['texto_completo']}\n\n"
-        
+
     user_prompt = f"SOLICITUD ORIGINAL DEL USUARIO:\n{query_original}\n\nEVIDENCIA TAXONÓMICA DISPONIBLE (CONTEXTO FIEL):\n{contexto_str}"
-    
+
     return call_llm_with_retry(
         prompt_sistema=PROMPT_SINTESIS,
         prompt_usuario=user_prompt,
@@ -445,9 +371,9 @@ REGLAS DE FORMATO Y CONTRALOR:
 
 def agente_humanizar_respuesta(respuesta_tecnica: str, provider: str = "groq") -> str:
     print(f"🎭 [Agente Humanizador - {provider}] Adaptando narrativa al perfil: enfermero_guardia...")
-    
+
     user_prompt = f"PLAN TÉCNICO DE ENTRADA:\n{respuesta_tecnica}"
-    
+
     return call_llm_with_retry(
         prompt_sistema=PROMPT_HUMANIZADOR,
         prompt_usuario=user_prompt,
