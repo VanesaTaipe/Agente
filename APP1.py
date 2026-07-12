@@ -8,7 +8,7 @@ import google.generativeai as genai
 import faiss
 from openai import OpenAI
 from sentence_transformers import SentenceTransformer
-
+from audio_recorder_streamlit import audio_recorder
 # Importación del módulo de agentes con prompts originales
 from agentes import (
     agente_reformular_consulta,
