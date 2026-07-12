@@ -168,7 +168,7 @@ REGLA DE MEJORA METODOLÓGICA (NORMALIZACIÓN LÉXICA):
 
 No agregues conceptos nuevos.
 
-No reemplaces términos por otros más técnicos si estos no aparecen explícitamente en el texto original (excepto para la normalización de lenguaje coloquial descrita arriba).
+No reemplaces términos por otros más técnicos si estos no aparecen explícitamente in el texto original (excepto para la normalización de lenguaje coloquial descrita arriba).
 
 No generes sinónimos clínicos especulativos o que reorienten la búsqueda.
 
@@ -225,42 +225,114 @@ def agente_reformular_consulta(query_usuario: str, provider: str = "groq", model
 # ==========================================================
 # 3. MOTOR DE RECUPERACIÓN VECTORIAL (RETRIEVER ADAPTADO)
 # ==========================================================
-# ==========================================================
-# 3. MOTOR DE RECUPERACIÓN VECTORIAL (RETRIEVER)
-# ==========================================================
-import faiss
-import numpy as np
-from sentence_transformers import SentenceTransformer
-
 class NICRetriever:
-    def __init__(self, index_path: str, metadata_path: str, model_path: str):
-        self.index = faiss.read_index(index_path)
-        with open(metadata_path, "r", encoding="utf-8") as f:
-            self.metadata = json.load(f)
-        self.embedding_model = SentenceTransformer(model_path)
+    """
+    Componente modificado para aceptar la inicialización clásica de producción
+    basada en rutas o repositorios remotos privados de Hugging Face de forma segura.
+    """
+    def __init__(self, index=None, metadata=None, embedding_model=None, index_path=None, metadata_path=None, model_path=None):
+        # Escenario A: Inicialización desde la App de Streamlit por objetos (LangChain vectorstore)
+        if index is not None and embedding_model is not None:
+            self.index = index
+            self.metadata = metadata
+            self.embedding_model = embedding_model
+            self.es_modo_langchain = True
+        
+        # Escenario B: Inicialización clásica por rutas o Repositorios Remotos de HF (Evita el ValueError)
+        elif index_path is not None and metadata_path is not None and model_path is not None:
+            import faiss
+            from sentence_transformers import SentenceTransformer
+            
+            print("📂 [Retriever] Cargando motor nativo FAISS conectando con Hugging Face...")
+            self.index = faiss.read_index(index_path)
+            self.es_modo_langchain = False
+            
+            # Recuperamos el token de entorno configurado de forma segura
+            hf_token_seguro = os.getenv("HF_TOKEN")
+            
+            # Descargamos el modelo desde Hugging Face usando el token de autenticación
+            self.embedding_model = SentenceTransformer(
+                model_path,
+                model_kwargs={"token": hf_token_seguro}
+            )
+            
+            with open(metadata_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                
+            self.metadata = {}
+            self.order = []
+            
+            if isinstance(data, list):
+                for item in data:
+                    doc_id = str(item.get("id", len(self.order)))
+                    codigo_raw = item.get("codigo", "")
+                    try:
+                        codigo = str(int(float(codigo_raw))).zfill(4)
+                    except Exception:
+                        codigo = str(codigo_raw).strip().zfill(4)
+                        
+                    self.metadata[doc_id] = {
+                        "codigo": codigo,
+                        "nombre": item.get("nombre", "Intervención NIC"),
+                        "chunk_num": item.get("chunk_num"),
+                        "chunk_id": item.get("chunk_id"),
+                        "texto_completo": item.get("texto", "")
+                    }
+                    self.order.append(doc_id)
+            elif isinstance(data, dict):
+                self.metadata = data.get("mapping", {})
+                self.order = data.get("order", [])
 
     def buscar(self, query_rag: str, k: int = 5) -> List[Dict]:
         q_text = query_rag if query_rag.lower().startswith("query: ") else f"query: {query_rag}"
-
-        query_vec = self.embedding_model.encode([q_text], normalize_embeddings=True)
-        query_vec = np.array(query_vec, dtype="float32")
-
-        scores, indices = self.index.search(query_vec, k)
-
         pool = []
-        for score, idx in zip(scores[0], indices[0]):
-            if idx == -1:
-                continue
-            meta = self.metadata[idx] if isinstance(self.metadata, list) else self.metadata[str(idx)]
-            pool.append({
-                "codigo": meta.get("codigo", "0000"),
-                "nombre": meta.get("nombre", "Intervención NIC"),
-                "chunk_num": meta.get("chunk_num", idx),
-                "chunk_id": meta.get("chunk_id", f"{meta.get('codigo', '0000')}_{idx}"),
-                "texto_completo": meta.get("texto_completo", meta.get("texto", "")),
-                "score": round(float(score), 4)
-            })
+        
+        if getattr(self, "es_modo_langchain", True):
+            # Modo Streamlit / Langchain Vectorstore wrapper
+            resultados = self.embedding_model.similarity_search_with_score(q_text, k=k)
+            for i, (doc, score) in enumerate(resultados):
+                pool.append({
+                    "codigo": doc.metadata.get("codigo", "0000"),
+                    "nombre": doc.metadata.get("nombre", "Intervención NIC"),
+                    "chunk_num": doc.metadata.get("chunk_num", i),
+                    "chunk_id": doc.metadata.get("chunk_id", f"{doc.metadata.get('codigo', '0000')}_{i}"),
+                    "texto_completo": doc.page_content,
+                    "score": round(float(score), 4)
+                })
+        else:
+            # Modo Kaggle / Inferencia nativa remota con SentenceTransformer
+            q_emb = self.embedding_model.encode([q_text], normalize_embeddings=True, convert_to_numpy=True).astype("float32")
+            scores, indices = self.index.search(q_emb, k)
+            for i, idx in enumerate(indices[0]):
+                if idx == -1: continue
+                score = round(float(scores[0][i]), 4)
+                
+                if idx < len(self.order):
+                    key = self.order[idx]
+                    if key in self.metadata:
+                        meta = self.metadata[key]
+                        pool.append({
+                            "codigo": meta["codigo"],
+                            "nombre": meta["nombre"],
+                            "chunk_num": meta.get("chunk_num"),
+                            "chunk_id": meta.get("chunk_id"),
+                            "texto_completo": meta["texto_completo"],
+                            "score": score
+                        })
+                else:
+                    str_idx = str(idx).zfill(4)
+                    if str_idx in self.metadata:
+                        meta = self.metadata[str_idx]
+                        pool.append({
+                            "codigo": meta["codigo"],
+                            "nombre": meta["nombre"],
+                            "chunk_num": meta.get("chunk_num"),
+                            "chunk_id": meta.get("chunk_id"),
+                            "texto_completo": meta["texto_completo"],
+                            "score": score
+                        })
         return pool
+
 
 # ==========================================================
 # 4. AGENTE 2: CRÍTICO DE INTEGRIDAD CLÍNICA (NEUTRO)
